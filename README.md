@@ -18,7 +18,7 @@ To build,
 
 For example, to find the definition of the symbol at position `100` in the file `foo.go`,
 
-```gosym -f foo.go -o 100``
+```gosym -f foo.go -o 100```
 
 You can replace godef with gosym by symbolic linking gosym to godef. This should
 work with go-mode.el in Emacs.
