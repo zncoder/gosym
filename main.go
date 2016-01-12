@@ -28,7 +28,7 @@ var (
 	offset    = flag.Int("o", 0, "offset in file, 1 based")
 	stdin     = flag.Bool("i", false, "read file from stdin")
 	// 2-pass is the fastest and loader is slowest
-	pass = flag.Int("p", 3, "parse algorithm. can be 1, 2 or 3. 2 is the fastest. 3 is slowest but most reliable")
+	pass = flag.Int("p", 1, "parse algorithm. can be 1, 2 or 3. 2 is the fastest. 3 is slowest but most reliable")
 )
 
 var logf *os.File
@@ -67,15 +67,12 @@ func printPos(pos token.Pos) string {
 	return fset.Position(pos).String()
 }
 
-func pkgFiles(p string) []string {
+func pkgFiles(p string) (files, imports []string) {
 	pkg, err := build.Import(p, "", 0)
 	if err != nil {
-		lg("import pkg=%s err=%v", p, err)
-		return nil
+		lg("import pkg=%s err=%v pkg=%+v", p, err, pkg)
+		return nil, nil
 	}
-
-	// TODO: use Imports in one-pass to parse fewer files.
-	lg("pkg=%s imports %v", p, pkg.Imports)
 
 	isTest := isTestFile(*filename)
 	n := len(pkg.GoFiles)
@@ -93,7 +90,7 @@ func pkgFiles(p string) []string {
 			out[m+i] = filepath.Join(pkg.Dir, f)
 		}
 	}
-	return out
+	return out, pkg.Imports
 }
 
 func isTestFile(fn string) bool {
@@ -101,13 +98,13 @@ func isTestFile(fn string) bool {
 	return strings.HasSuffix(fn, "_test")
 }
 
-func parseMyPkg() (myPkg string, fs []*ast.File, chain []ast.Node) {
+func parseMyPkg() (myPkg string, fs []*ast.File, imports []string, chain []ast.Node) {
 	myPkg = pkgPath(*filename)
-	fns := pkgFiles(myPkg)
+	fns, imports := pkgFiles(myPkg)
 	if fns == nil {
 		fns = []string{*filename}
 	}
-	lg("files in pkg=%s: %v", myPkg, fns)
+	lg("mypkg=%s: files=%v imports=%v", myPkg, fns, imports)
 
 	for _, fn := range fns {
 		var f *ast.File
@@ -134,7 +131,7 @@ func parseMyPkg() (myPkg string, fs []*ast.File, chain []ast.Node) {
 			chain, _ = astutil.PathEnclosingInterval(f, pos, pos+1)
 		}
 	}
-	return myPkg, fs, chain
+	return myPkg, fs, imports, chain
 }
 
 func findIdent(chain []ast.Node) *ast.Ident {
@@ -161,7 +158,7 @@ func newSrcImporter() srcImporter {
 }
 
 func importSrcPkg(cfg *types.Config, path string) (*types.Package, error) {
-	fns := pkgFiles(path)
+	fns, _ := pkgFiles(path)
 	var fs []*ast.File
 	for _, fn := range fns {
 		f := parseFile(fn, nil)
@@ -176,13 +173,13 @@ func (si srcImporter) Import(path string) (*types.Package, error) {
 }
 
 type hybridImporter struct {
-	cfg      types.Config
-	pkgInUse string
+	cfg     types.Config
+	imports []string
 }
 
-func newHybridImporter(pkg string) *hybridImporter {
+func newHybridImporter(imports ...string) *hybridImporter {
 	return &hybridImporter{
-		pkgInUse: pkg,
+		imports: imports,
 		cfg: types.Config{
 			Importer: importer.Default(),
 			Error:    func(err error) {},
@@ -192,17 +189,30 @@ func newHybridImporter(pkg string) *hybridImporter {
 }
 
 func (hi *hybridImporter) Import(path string) (*types.Package, error) {
-	if path != hi.pkgInUse {
-		// TODO: try cfg when the default importer fails to find the binary package.
+	if !hi.contains(path) {
 		lg("import pkg=%s using default importer", path)
-		return hi.cfg.Importer.Import(path)
+		if pkg, err := hi.cfg.Importer.Import(path); err == nil {
+			return pkg, nil
+		} else {
+			lg("import pkg=%s using default importer err=%v. fall back to source importer", path, err)
+		}
 	}
-	return importSrcPkg(&hi.cfg, hi.pkgInUse)
+
+	return importSrcPkg(&hi.cfg, path)
 }
 
-func onePass(myPkg string, fs []*ast.File, target *ast.Ident) {
+func (hi *hybridImporter) contains(path string) bool {
+	for _, p := range hi.imports {
+		if p == path {
+			return true
+		}
+	}
+	return false
+}
+
+func onePass(myPkg string, fs []*ast.File, imports []string, target *ast.Ident) {
 	cfg := types.Config{
-		Importer: newSrcImporter(),
+		Importer: newHybridImporter(imports...),
 		Error:    func(err error) {},
 		DisableUnusedImportCheck: true,
 	}
@@ -330,7 +340,7 @@ func main() {
 
 	lg("args=%v", os.Args)
 
-	myPkg, fs, chain := parseMyPkg()
+	myPkg, fs, imports, chain := parseMyPkg()
 	target := findIdent(chain)
 	if target == nil {
 		fail()
@@ -339,7 +349,7 @@ func main() {
 
 	switch *pass {
 	case 1:
-		onePass(myPkg, fs, target)
+		onePass(myPkg, fs, imports, target)
 	case 2:
 		twoPass(myPkg, fs, target)
 	case 3:
