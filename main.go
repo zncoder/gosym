@@ -27,8 +27,7 @@ var (
 	filename  = flag.String("f", "", "file")
 	offset    = flag.Int("o", 0, "offset in file, 1 based")
 	stdin     = flag.Bool("i", false, "read file from stdin")
-	// 2-pass is the fastest and loader is slowest
-	pass = flag.Int("p", 1, "parse algorithm. can be 1, 2 or 3. 2 is the fastest. 3 is slowest but most reliable")
+	pass      = flag.Int("p", 4, "parse algorithm")
 )
 
 var logf *os.File
@@ -178,7 +177,7 @@ type hybridImporter struct {
 }
 
 func newHybridImporter(imports ...string) *hybridImporter {
-	return &hybridImporter{
+	hi := &hybridImporter{
 		imports: imports,
 		cfg: types.Config{
 			Importer: importer.Default(),
@@ -186,19 +185,23 @@ func newHybridImporter(imports ...string) *hybridImporter {
 			DisableUnusedImportCheck: true,
 		},
 	}
+	return hi
 }
 
-func (hi *hybridImporter) Import(path string) (*types.Package, error) {
+func (hi *hybridImporter) Import(path string) (pkg *types.Package, err error) {
 	if !hi.contains(path) {
 		lg("import pkg=%s using default importer", path)
-		if pkg, err := hi.cfg.Importer.Import(path); err == nil {
+		if pkg, err = hi.cfg.Importer.Import(path); err == nil {
 			return pkg, nil
-		} else {
-			lg("import pkg=%s using default importer err=%v. fall back to source importer", path, err)
 		}
+		lg("import pkg=%s using default importer err=%v. fall back to source importer", path, err)
 	}
 
-	return importSrcPkg(&hi.cfg, path)
+	if pkg, err = importSrcPkg(&hi.cfg, path); err == nil {
+		return pkg, nil
+	}
+	lg("import source pkg=%s err=%v pkg=%v", path, err, pkg)
+	return pkg, err
 }
 
 func (hi *hybridImporter) contains(path string) bool {
@@ -210,7 +213,7 @@ func (hi *hybridImporter) contains(path string) bool {
 	return false
 }
 
-func onePass(myPkg string, fs []*ast.File, imports []string, target *ast.Ident) {
+func onePass(myPkg string, fs []*ast.File, imports []string, target *ast.Ident) types.Object {
 	cfg := types.Config{
 		Importer: newHybridImporter(imports...),
 		Error:    func(err error) {},
@@ -220,9 +223,7 @@ func onePass(myPkg string, fs []*ast.File, imports []string, target *ast.Ident) 
 		Uses: make(map[*ast.Ident]types.Object),
 	}
 	cfg.Check(myPkg, fset, fs, &info)
-	obj := info.Uses[target]
-	lg("target=%v uses obj=%v", target, obj)
-	printTargetObj(obj)
+	return info.Uses[target]
 }
 
 // compatible with godef
@@ -239,10 +240,9 @@ func printTargetObj(obj types.Object) {
 	}
 }
 
-func twoPass(myPkg string, fs []*ast.File, target *ast.Ident) {
-	// first pass to find out the package of target
+func findInMyPkg(myPkg string, fs []*ast.File, target *ast.Ident) (obj types.Object, otherPkg string) {
 	cfg := types.Config{
-		Importer: newHybridImporter(""),
+		Importer: importer.Default(),
 		Error:    func(err error) {},
 		DisableUnusedImportCheck: true,
 	}
@@ -251,31 +251,42 @@ func twoPass(myPkg string, fs []*ast.File, target *ast.Ident) {
 	}
 	cfg.Check(myPkg, fset, fs, &info)
 
-	obj := info.Uses[target]
-	if obj == nil {
+	if obj = info.Uses[target]; obj == nil {
 		lg("object of target=%v not found", target)
 		fail()
 	}
 	// BUG:https://github.com/golang/go/issues/13898
-	otherPkg := obj.Pkg().Path()
+	otherPkg = obj.Pkg().Path()
 	lg("obj of target=%v is %v in pkg=%s", target, obj, otherPkg)
 
 	if otherPkg == myPkg {
-		lg("found in mypkg")
-		printTargetObj(obj)
-		return
+		return obj, myPkg
 	}
-
-	// second pass to find out the object of target
-	cfg.Importer = newHybridImporter(otherPkg)
-	info.Uses = make(map[*ast.Ident]types.Object)
-	cfg.Check(myPkg, fset, fs, &info)
-	obj = info.Uses[target]
-	lg("target=%v in otherpkg obj=%v", target, obj)
-	printTargetObj(obj)
+	return nil, otherPkg
 }
 
-func parseProgram(myPkg string, fs []*ast.File, target *ast.Ident) {
+func twoPass(myPkg string, fs []*ast.File, target *ast.Ident) types.Object {
+	// first pass to find out the package of target
+	obj, otherPkg := findInMyPkg(myPkg, fs, target)
+	if obj != nil {
+		return obj
+	}
+
+	// second pass to find out the object of target in otherPkg
+	cfg := types.Config{
+		Importer: newHybridImporter(otherPkg),
+		Error:    func(err error) {},
+		DisableUnusedImportCheck: true,
+	}
+	cfg.Importer = newHybridImporter(otherPkg)
+	info := types.Info{
+		Uses: make(map[*ast.Ident]types.Object),
+	}
+	cfg.Check(myPkg, fset, fs, &info)
+	return info.Uses[target]
+}
+
+func parseProgram(myPkg string, fs []*ast.File, target *ast.Ident) types.Object {
 	cfg := loader.Config{
 		Fset:       fset,
 		ParserMode: parser.AllErrors,
@@ -296,20 +307,36 @@ func parseProgram(myPkg string, fs []*ast.File, target *ast.Ident) {
 		lg("load program err=%v", err)
 	}
 
-	obj := findIdentObj(prog, target)
-	lg("target=%v uses obj=%v", target, obj)
-	printTargetObj(obj)
+	return findIdentObj(prog, target)
 }
 
 func findIdentObj(prog *loader.Program, target *ast.Ident) types.Object {
 	pkg := prog.Created[0]
+	for id, obj := range pkg.Uses {
+		if target == id {
+			return obj
+		}
+	}
 	for id, obj := range pkg.Defs {
 		if target == id {
 			return obj
 		}
 	}
-	for id, obj := range pkg.Uses {
-		if target == id {
+	return nil
+}
+
+func parallelPass(myPkg string, fs []*ast.File, target *ast.Ident) types.Object {
+	out := make(chan types.Object, 2)
+	go func() {
+		obj, _ := findInMyPkg(myPkg, fs, target)
+		out <- obj
+	}()
+	go func() {
+		out <- parseProgram(myPkg, fs, target)
+	}()
+	for i := 0; i < 2; i++ {
+		obj := <-out
+		if obj != nil {
 			return obj
 		}
 	}
@@ -347,12 +374,18 @@ func main() {
 	}
 	lg("target is %v@%v", target, printPos(target.Pos()))
 
+	// TODO: once issue 13898 is fixed, we can make two-pass work.
+	var obj types.Object
 	switch *pass {
 	case 1:
-		onePass(myPkg, fs, imports, target)
+		obj = onePass(myPkg, fs, imports, target)
 	case 2:
-		twoPass(myPkg, fs, target)
+		obj = twoPass(myPkg, fs, target)
 	case 3:
-		parseProgram(myPkg, fs, target)
+		obj = parseProgram(myPkg, fs, target)
+	case 4:
+		obj = parallelPass(myPkg, fs, target)
 	}
+	lg("target=%v in otherpkg obj=%v", target, obj)
+	printTargetObj(obj)
 }
