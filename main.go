@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -14,6 +15,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -28,6 +30,7 @@ var (
 	offset    = flag.Int("o", 0, "offset in file, 1 based")
 	stdin     = flag.Bool("i", false, "read file from stdin")
 	pass      = flag.Int("p", 4, "parse algorithm")
+	godef     = flag.String("godef", "godef.orig", "path to godef")
 )
 
 var logf *os.File
@@ -97,6 +100,8 @@ func isTestFile(fn string) bool {
 	return strings.HasSuffix(fn, "_test")
 }
 
+var fileBody []byte
+
 func parseMyPkg() (myPkg string, fs []*ast.File, imports []string, chain []ast.Node) {
 	myPkg = pkgPath(*filename)
 	fns, imports := pkgFiles(myPkg)
@@ -111,6 +116,9 @@ func parseMyPkg() (myPkg string, fs []*ast.File, imports []string, chain []ast.N
 			b, err := ioutil.ReadAll(os.Stdin)
 			if err != nil {
 				log.Fatalf("read stdin err=%v", err)
+			}
+			if *godef != "" {
+				fileBody = b
 			}
 			f = parseFile(fn, b)
 		} else {
@@ -235,9 +243,19 @@ func fail() {
 func printTargetObj(obj types.Object) {
 	if obj != nil && obj.Pos() != token.NoPos {
 		fmt.Println(printPos(obj.Pos()))
-	} else {
-		fail()
+		return
 	}
+	if *godef != "" {
+		cmd := exec.Command(*godef, os.Args[1:]...)
+		cmd.Stdin = bytes.NewReader(fileBody)
+		b, err := cmd.Output()
+		if err != nil {
+			fail()
+		}
+		os.Stdout.Write(b)
+		return
+	}
+	fail()
 }
 
 func findInMyPkg(myPkg string, fs []*ast.File, target *ast.Ident) (obj types.Object, otherPkg string) {
@@ -253,7 +271,7 @@ func findInMyPkg(myPkg string, fs []*ast.File, target *ast.Ident) (obj types.Obj
 
 	if obj = info.Uses[target]; obj == nil {
 		lg("object of target=%v not found", target)
-		fail()
+		return nil, ""
 	}
 	// BUG:https://github.com/golang/go/issues/13898
 	otherPkg = obj.Pkg().Path()
@@ -329,10 +347,17 @@ func parallelPass(myPkg string, fs []*ast.File, target *ast.Ident) types.Object 
 	out := make(chan types.Object, 2)
 	go func() {
 		obj, _ := findInMyPkg(myPkg, fs, target)
+		if obj != nil {
+			lg("find in mypkg")
+		}
 		out <- obj
 	}()
 	go func() {
-		out <- parseProgram(myPkg, fs, target)
+		obj := parseProgram(myPkg, fs, target)
+		if obj != nil {
+			lg("find in parseprogram")
+		}
+		out <- obj
 	}()
 	for i := 0; i < 2; i++ {
 		obj := <-out
