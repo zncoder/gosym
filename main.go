@@ -29,7 +29,7 @@ var (
 	filename  = flag.String("f", "", "file")
 	offset    = flag.Int("o", 0, "offset in file, 1 based")
 	stdin     = flag.Bool("i", false, "read file from stdin")
-	pass      = flag.Int("p", 4, "parse algorithm")
+	mode      = flag.Int("m", 2, "parse algorithm")
 	godef     = flag.String("godef", "godef.orig", "path to godef")
 )
 
@@ -180,13 +180,13 @@ func (si srcImporter) Import(path string) (*types.Package, error) {
 }
 
 type hybridImporter struct {
-	cfg     types.Config
-	imports []string
+	cfg      types.Config
+	pkgInUse string
 }
 
-func newHybridImporter(imports ...string) *hybridImporter {
+func newHybridImporter(pkgInUse string) *hybridImporter {
 	hi := &hybridImporter{
-		imports: imports,
+		pkgInUse: pkgInUse,
 		cfg: types.Config{
 			Importer: importer.Default(),
 			Error:    func(err error) {},
@@ -197,7 +197,7 @@ func newHybridImporter(imports ...string) *hybridImporter {
 }
 
 func (hi *hybridImporter) Import(path string) (pkg *types.Package, err error) {
-	if !hi.contains(path) {
+	if hi.pkgInUse != path {
 		lg("import pkg=%s using default importer", path)
 		if pkg, err = hi.cfg.Importer.Import(path); err == nil {
 			return pkg, nil
@@ -210,28 +210,6 @@ func (hi *hybridImporter) Import(path string) (pkg *types.Package, err error) {
 	}
 	lg("import source pkg=%s err=%v pkg=%v", path, err, pkg)
 	return pkg, err
-}
-
-func (hi *hybridImporter) contains(path string) bool {
-	for _, p := range hi.imports {
-		if p == path {
-			return true
-		}
-	}
-	return false
-}
-
-func onePass(myPkg string, fs []*ast.File, imports []string, target *ast.Ident) types.Object {
-	cfg := types.Config{
-		Importer: newHybridImporter(imports...),
-		Error:    func(err error) {},
-		DisableUnusedImportCheck: true,
-	}
-	info := types.Info{
-		Uses: make(map[*ast.Ident]types.Object),
-	}
-	cfg.Check(myPkg, fset, fs, &info)
-	return info.Uses[target]
 }
 
 // compatible with godef
@@ -392,7 +370,7 @@ func main() {
 
 	lg("args=%v", os.Args)
 
-	myPkg, fs, imports, chain := parseMyPkg()
+	myPkg, fs, _, chain := parseMyPkg()
 	target := findIdent(chain)
 	if target == nil {
 		fail()
@@ -401,14 +379,10 @@ func main() {
 
 	// TODO: once issue 13898 is fixed, we can make two-pass work.
 	var obj types.Object
-	switch *pass {
+	switch *mode {
 	case 1:
-		obj = onePass(myPkg, fs, imports, target)
-	case 2:
 		obj = twoPass(myPkg, fs, target)
-	case 3:
-		obj = parseProgram(myPkg, fs, target)
-	case 4:
+	case 2:
 		obj = parallelPass(myPkg, fs, target)
 	}
 	lg("target=%v in otherpkg obj=%v", target, obj)
