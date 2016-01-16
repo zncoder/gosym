@@ -1,4 +1,4 @@
-// +build go1.5
+// +build go1.6
 
 package main
 
@@ -29,7 +29,6 @@ var (
 	filename  = flag.String("f", "", "file")
 	offset    = flag.Int("o", 0, "offset in file, 1 based")
 	stdin     = flag.Bool("i", false, "read file from stdin")
-	mode      = flag.Int("m", 2, "parse algorithm")
 	godef     = flag.String("godef", "godef.orig", "path to godef")
 )
 
@@ -265,6 +264,7 @@ func twoPass(myPkg string, fs []*ast.File, target *ast.Ident) types.Object {
 	// first pass to find out the package of target
 	obj, otherPkg := findInMyPkg(myPkg, fs, target)
 	if obj != nil {
+		lg("find in mypkg")
 		return obj
 	}
 
@@ -324,9 +324,9 @@ func findIdentObj(prog *loader.Program, target *ast.Ident) types.Object {
 func parallelPass(myPkg string, fs []*ast.File, target *ast.Ident) types.Object {
 	out := make(chan types.Object, 2)
 	go func() {
-		obj, _ := findInMyPkg(myPkg, fs, target)
+		obj := twoPass(myPkg, fs, target)
 		if obj != nil {
-			lg("find in mypkg")
+			lg("find in two-pass")
 		}
 		out <- obj
 	}()
@@ -378,13 +378,7 @@ func main() {
 	lg("target is %v@%v", target, printPos(target.Pos()))
 
 	// TODO: once issue 13898 is fixed, we can make two-pass work.
-	var obj types.Object
-	switch *mode {
-	case 1:
-		obj = twoPass(myPkg, fs, target)
-	case 2:
-		obj = parallelPass(myPkg, fs, target)
-	}
+	obj := parallelPass(myPkg, fs, target)
 	lg("target=%v in otherpkg obj=%v", target, obj)
 	printTargetObj(obj)
 }
