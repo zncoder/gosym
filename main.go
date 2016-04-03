@@ -1,9 +1,12 @@
-// +build go1.5
+// +build go1.6
 
 package main
 
 import (
 	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -17,7 +20,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/loader"
@@ -25,20 +31,17 @@ import (
 
 var (
 	verbose   = flag.Bool("debug", false, "verbose")
-	logToFile = flag.Bool("log", false, "log to tmp file")
 	filename  = flag.String("f", "", "file")
 	offset    = flag.Int("o", 0, "offset in file, 1 based")
 	stdin     = flag.Bool("i", false, "read file from stdin")
 	godef     = flag.String("godef", "godef.orig", "path to godef")
+	cacheFile = flag.String("cache", os.ExpandEnv("$HOME/.cache/gosym.recent"), "recent go symbols")
 )
 
-var logf *os.File
-
 func lg(format string, arg ...interface{}) {
-	if logf != nil {
-		fmt.Fprintf(logf, format+"\n", arg...)
-	} else if *verbose {
-		log.Printf(format, arg...)
+	if *verbose {
+		_, fn, ln, _ := runtime.Caller(1)
+		log.Printf(fmt.Sprintf("%s:%d %s", fn, ln, format), arg...)
 	}
 }
 
@@ -100,6 +103,12 @@ func isTestFile(fn string) bool {
 }
 
 var fileBody []byte
+var fileSHA1 string
+
+func sha(b []byte) string {
+	sum := sha1.Sum(b)
+	return hex.EncodeToString(sum[:])
+}
 
 func parseMyPkg() (myPkg string, fs []*ast.File, imports []string, chain []ast.Node) {
 	myPkg = pkgPath(*filename)
@@ -111,15 +120,19 @@ func parseMyPkg() (myPkg string, fs []*ast.File, imports []string, chain []ast.N
 
 	for _, fn := range fns {
 		var f *ast.File
-		if fn == *filename && *stdin {
-			b, err := ioutil.ReadAll(os.Stdin)
+		var err error
+
+		if fn == *filename {
+			if *stdin {
+				fileBody, err = ioutil.ReadAll(os.Stdin)
+			} else {
+				fileBody, err = ioutil.ReadFile(fn)
+			}
 			if err != nil {
-				log.Fatalf("read stdin err=%v", err)
+				log.Fatalf("read stdin or file=%s err=%v", fn, err)
 			}
-			if *godef != "" {
-				fileBody = b
-			}
-			f = parseFile(fn, b)
+			fileSHA1 = sha(fileBody)
+			f = parseFile(fn, fileBody)
 		} else {
 			f = parseFile(fn, nil)
 		}
@@ -267,6 +280,9 @@ func twoPass(myPkg string, fs []*ast.File, target *ast.Ident) types.Object {
 		lg("find in mypkg")
 		return obj
 	}
+	if otherPkg == "" {
+		return nil
+	}
 
 	// second pass to find out the object of target in otherPkg
 	cfg := types.Config{
@@ -321,7 +337,147 @@ func findIdentObj(prog *loader.Program, target *ast.Ident) types.Object {
 	return nil
 }
 
+// ident => object: position, created, sha1
+type objectEntry struct {
+	FromSHA1 string
+	ToPos    string
+	ToSHA1   string
+	Created  int64
+	bad      bool
+}
+
+type recentObjects struct {
+	entries map[string]*objectEntry
+}
+
+var recents *recentObjects
+
+func findRecent(ident *ast.Ident) {
+	if recents == nil {
+		return
+	}
+
+	k := printPos(ident.Pos())
+
+	ent, ok := recents.entries[k]
+	if !ok {
+		return
+	}
+
+	if !validEntry(ent) {
+		ent.bad = true
+		return
+	}
+
+	lg("find in recent")
+	fmt.Println(ent.ToPos)
+	os.Exit(0)
+}
+
+func validEntry(ent *objectEntry) bool {
+	if ent.FromSHA1 != fileSHA1 {
+		return false
+	}
+
+	i := strings.LastIndexByte(ent.ToPos, ':')
+	if i < 0 {
+		return false
+	}
+	i = strings.LastIndexByte(ent.ToPos[:i], ':')
+	if i < 0 {
+		return false
+	}
+	fn := ent.ToPos[:i]
+
+	return fileSHA(fn) == ent.ToSHA1
+}
+
+func fileSHA(fn string) string {
+	b, err := ioutil.ReadFile(fn)
+	if err != nil {
+		return ""
+	}
+	return sha(b)
+}
+
+func loadRecents() {
+	if *cacheFile == "" {
+		return
+	}
+
+	b, err := ioutil.ReadFile(*cacheFile)
+	if err != nil {
+		return
+	}
+
+	recents = &recentObjects{}
+	if err = json.Unmarshal(b, &recents.entries); err != nil {
+		lg("unmarshal recents err=%v", err)
+	}
+}
+
+func saveRecent(ident *ast.Ident, obj types.Object) {
+	if *cacheFile == "" {
+		return
+	}
+	if obj == nil || obj.Pos() == token.NoPos {
+		return
+	}
+
+	if fset.Position(ident.Pos()).Filename == fset.Position(obj.Pos()).Filename {
+		lg("same file")
+		return
+	}
+
+	k := printPos(ident.Pos())
+
+	sha := fileSHA(fset.Position(obj.Pos()).Filename)
+	if sha == "" {
+		return
+	}
+
+	now := time.Now()
+	ent := &objectEntry{
+		FromSHA1: fileSHA1,
+		ToPos:    printPos(obj.Pos()),
+		ToSHA1:   sha,
+		Created:  now.UnixNano(),
+	}
+	lg("new recent entry %s => %+v", k, ent)
+
+	if recents == nil {
+		recents = &recentObjects{entries: make(map[string]*objectEntry)}
+	}
+	recents.entries[k] = ent
+
+	expire := now.Add(-24 * time.Hour).UnixNano()
+	for k, ent := range recents.entries {
+		if ent.bad || ent.Created < expire {
+			delete(recents.entries, k)
+		}
+	}
+
+	b, err := json.MarshalIndent(recents.entries, "", "  ")
+	if err != nil {
+		lg("marshal recents err=%v", err)
+		return
+	}
+	if err = ioutil.WriteFile(*cacheFile, b, 0600); err != nil {
+		lg("write recents err=%v", err)
+	}
+}
+
 func parallelPass(myPkg string, fs []*ast.File, target *ast.Ident) types.Object {
+	var wg sync.WaitGroup
+	if recents != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			findRecent(target)
+		}()
+	}
+	defer wg.Wait()
+
 	out := make(chan types.Object, 2)
 	go func() {
 		obj := twoPass(myPkg, fs, target)
@@ -356,10 +512,6 @@ func main() {
 	flag.Bool("t", false, "")
 	flag.Parse()
 
-	if *logToFile {
-		logf, _ = ioutil.TempFile(os.TempDir(), "gosym-log.")
-	}
-
 	*filename, _ = filepath.Abs(*filename)
 
 	// offset is 1-based, but token.File.Offset is 0-based.
@@ -370,6 +522,8 @@ func main() {
 
 	lg("args=%v", os.Args)
 
+	loadRecents()
+
 	myPkg, fs, _, chain := parseMyPkg()
 	target := findIdent(chain)
 	if target == nil {
@@ -377,8 +531,9 @@ func main() {
 	}
 	lg("target is %v@%v", target, printPos(target.Pos()))
 
-	// TODO: once issue 13898 is fixed, we can make two-pass work.
 	obj := parallelPass(myPkg, fs, target)
 	lg("target=%v in otherpkg obj=%v", target, obj)
+
+	saveRecent(target, obj)
 	printTargetObj(obj)
 }
