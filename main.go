@@ -67,7 +67,24 @@ func tokenFile(f *ast.File) *token.File {
 	return fset.File(f.Package)
 }
 
-func printPos(pos token.Pos) string {
+type posPrinter struct {
+	arg interface{}
+}
+
+func (pp posPrinter) String() string {
+	var pos token.Pos
+	switch arg := pp.arg.(type) {
+	case types.Object:
+		if arg != nil {
+			pos = arg.Pos()
+		}
+	case *ast.Ident:
+		if arg != nil {
+			pos = arg.Pos()
+		}
+	case token.Pos:
+		pos = arg
+	}
 	return fset.Position(pos).String()
 }
 
@@ -146,7 +163,7 @@ func parseMyPkg() (myPkg string, fs []*ast.File, imports []string, chain []ast.N
 				lg("no pos found")
 				fail()
 			}
-			lg("pos=%v", printPos(pos))
+			lg("pos=%v", posPrinter{pos})
 			chain, _ = astutil.PathEnclosingInterval(f, pos, pos+1)
 		}
 	}
@@ -232,7 +249,7 @@ func fail() {
 
 func printTargetObj(obj types.Object) {
 	if obj != nil && obj.Pos() != token.NoPos {
-		fmt.Println(printPos(obj.Pos()))
+		fmt.Println(posPrinter{obj})
 		return
 	}
 	if *godef != "" {
@@ -357,7 +374,7 @@ func findRecent(ident *ast.Ident) {
 		return
 	}
 
-	k := printPos(ident.Pos())
+	k := posPrinter{ident}.String()
 
 	ent, ok := recents.entries[k]
 	if !ok {
@@ -429,7 +446,7 @@ func saveRecent(ident *ast.Ident, obj types.Object) {
 		return
 	}
 
-	k := printPos(ident.Pos())
+	k := posPrinter{ident}.String()
 
 	sha := fileSHA(fset.Position(obj.Pos()).Filename)
 	if sha == "" {
@@ -439,7 +456,7 @@ func saveRecent(ident *ast.Ident, obj types.Object) {
 	now := time.Now()
 	ent := &objectEntry{
 		FromSHA1: fileSHA1,
-		ToPos:    printPos(obj.Pos()),
+		ToPos:    posPrinter{obj}.String(),
 		ToSHA1:   sha,
 		Created:  now.UnixNano(),
 	}
@@ -534,10 +551,10 @@ func main() {
 	if target == nil {
 		fail()
 	}
-	lg("target is %v@%v", target, printPos(target.Pos()))
+	lg("target is %v@%v", target, posPrinter{target})
 
 	obj := parallelPass(myPkg, fs, target)
-	lg("target=%v in otherpkg obj=%v@%s", target, obj, printPos(obj.Pos()))
+	lg("target=%v in otherpkg obj=%v@%s", target, obj, posPrinter{obj})
 
 	saveRecent(target, obj)
 	printTargetObj(obj)
