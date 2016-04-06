@@ -482,7 +482,12 @@ func parallelPass(myPkg string, fs []*ast.File, target *ast.Ident) types.Object 
 	go func() {
 		obj := twoPass(myPkg, fs, target)
 		if obj != nil {
-			lg("find in two-pass")
+			if obj.Pos() == token.NoPos {
+				lg("find in binary package in two-pass")
+				obj = nil
+			} else {
+				lg("find in two-pass")
+			}
 		}
 		out <- obj
 	}()
@@ -532,7 +537,7 @@ func main() {
 	lg("target is %v@%v", target, printPos(target.Pos()))
 
 	obj := parallelPass(myPkg, fs, target)
-	lg("target=%v in otherpkg obj=%v", target, obj)
+	lg("target=%v in otherpkg obj=%v@%s", target, obj, printPos(obj.Pos()))
 
 	saveRecent(target, obj)
 	printTargetObj(obj)
