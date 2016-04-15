@@ -153,6 +153,9 @@ func parseMyPkg() (myPkg string, fs []*ast.File, imports []string, chain []ast.N
 		} else {
 			f = parseFile(fn, nil)
 		}
+		if f == nil {
+			fail()
+		}
 
 		fs = append(fs, f)
 
@@ -164,10 +167,21 @@ func parseMyPkg() (myPkg string, fs []*ast.File, imports []string, chain []ast.N
 				fail()
 			}
 			lg("pos=%v", posPrinter{pos})
-			chain, _ = astutil.PathEnclosingInterval(f, pos, pos+1)
+			chain = findNodeChain(f, pos)
 		}
 	}
 	return myPkg, fs, imports, chain
+}
+
+func findNodeChain(f *ast.File, pos token.Pos) []ast.Node {
+	defer func() {
+		if r := recover(); r != nil {
+			lg("findnodechain recovered r=%v", r)
+			fail()
+		}
+	}()
+	chain, _ := astutil.PathEnclosingInterval(f, pos, pos+1)
+	return chain
 }
 
 func findIdent(chain []ast.Node) *ast.Ident {
