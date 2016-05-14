@@ -143,6 +143,7 @@ func parseMyPkg() (myPkg string, fs []*ast.File, imports []string, chain []ast.N
 		if fn == *filename {
 			if *stdin {
 				fileBody, err = ioutil.ReadAll(os.Stdin)
+				lg("body=%s", fileBody)
 			} else {
 				fileBody, err = ioutil.ReadFile(fn)
 			}
@@ -553,6 +554,9 @@ func main() {
 		os.Remove(*cacheFile)
 		return
 	}
+
+	lg("goroot=%s", os.Getenv("GOROOT"))
+	lg("gopath=%s", os.Getenv("GOPATH"))
 
 	*filename, _ = filepath.Abs(*filename)
 
