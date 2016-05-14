@@ -30,12 +30,13 @@ import (
 )
 
 var (
-	verbose   = flag.Bool("debug", false, "verbose")
-	filename  = flag.String("f", "", "file")
-	offset    = flag.Int("o", 0, "offset in file, 1 based")
-	stdin     = flag.Bool("i", false, "read file from stdin")
-	godef     = flag.String("godef", "godef.orig", "path to godef")
-	cacheFile = flag.String("cache", os.ExpandEnv("$HOME/.cache/gosym.recent"), "recent go symbols")
+	verbose    = flag.Bool("debug", false, "verbose")
+	filename   = flag.String("f", "", "file")
+	offset     = flag.Int("o", 0, "offset in file, 1 based")
+	stdin      = flag.Bool("i", false, "read file from stdin")
+	godef      = flag.String("godef", "godef.orig", "path to godef")
+	cacheFile  = flag.String("cache", os.ExpandEnv("$HOME/.cache/gosym.recent"), "recent go symbols")
+	pruneCache = flag.Bool("prune", false, "prune gosym cache")
 )
 
 func lg(format string, arg ...interface{}) {
@@ -547,6 +548,11 @@ func main() {
 	flag.Bool("acme", false, "")
 	flag.Bool("t", false, "")
 	flag.Parse()
+
+	if *pruneCache {
+		os.Remove(*cacheFile)
+		return
+	}
 
 	*filename, _ = filepath.Abs(*filename)
 
